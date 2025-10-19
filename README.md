@@ -1,21 +1,21 @@
 # Fuzzy-Logic-Profiles
 
     
-# 🏙️ 15-Minute City – Fuzzy Logic Evaluation System
+# 15-Minute City – Fuzzy Logic Evaluation System
 
 This repository contains a **fuzzy logic–based evaluation system** that measures the **attractiveness of apartments** in the context of the *15-Minute City* concept.  
 The project integrates **geospatial data from OpenStreetMap**, **distance analysis**, and **profile-dependent fuzzy rules** to assess how well each apartment fits various lifestyle profiles (e.g. family, student, pet owner).
 
 ---
 
-## 📘 Project Overview
+##  Project Overview
 
 The goal is to evaluate residential locations by simulating access to essential Points of Interest (POIs) — such as schools, parks, supermarkets, public transport, and more — within a **15-minute radius (≈1200 m)**.  
 A **fuzzy multi-criteria model** converts these spatial and contextual features into an overall *attractiveness score (0 – 1)* for each profile.
 
 ---
 
-## 🌍 Profiles
+##  Profiles
 
 Each apartment is evaluated from the perspective of **five user profiles**, each emphasizing different priorities:
 
@@ -29,7 +29,7 @@ Each apartment is evaluated from the perspective of **five user profiles**, each
 
 ---
 
-## 🧠 Fuzzy Logic Model
+##  Fuzzy Logic Model
 
 The overall attractiveness `A` for each apartment is computed as a **Sugeno-type weighted aggregation**:
 
@@ -48,7 +48,7 @@ Each partial component is normalized to [0 – 1]:
 
 ---
 
-## 🧩 POI Scoring Logic
+##  POI Scoring Logic
 
 For each apartment–POI pair, the system computes:
 
@@ -74,7 +74,7 @@ Negative weights (e.g. for clubs in *family* profile) act as **penalties**, redu
 
 ---
 
-## 🧮 Data Workflow
+##  Data Workflow
 
 | Step | Script | Description |
 |------|---------|-------------|
@@ -86,7 +86,7 @@ Output files:
 
 ---
 
-## 🧭 Example Output
+##  Example Output
 
 | apt_id | profile | POI | CENA | M2 | ZDJ | ATRACTYJNOŚĆ | TOP_PLUS | TOP_MINUS |
 |--------|----------|-----|------|----|------|--------------|-----------|------------|
@@ -96,7 +96,7 @@ Output files:
 
 ---
 
-## ✅ Validation & Testing
+##  Validation & Testing
 
 ### 1. Unit Tests
 Implemented using `pytest`.  
@@ -108,7 +108,7 @@ All fundamental functions are tested:
 - `POI feature` reaction to distance/coverage  
 - OSM classification rules (`stacja_kolej_metro` requires both tags)
 
-✅ **All 8 tests passed**.
+ **All 8 tests passed**.
 
 ### 2. Integration (Golden) Test
 A minimal synthetic scenario with known geometry and expected scores confirms:
@@ -116,7 +116,7 @@ A minimal synthetic scenario with known geometry and expected scores confirms:
 - correct fuzzy distance decay,
 - correct aggregation across `POI`, `CENA`, `M2`, and `ZDJ`.
 
-✅ **Full end-to-end validation passed.**
+ **Full end-to-end validation passed.**
 
 ### 3. Logical & Spatial Validation
 - Cross-profile comparison: each profile prefers different locations.  
@@ -125,7 +125,7 @@ A minimal synthetic scenario with known geometry and expected scores confirms:
 
 ---
 
-## 🧭 Dependencies
+##  Dependencies
 
 ```bash
 python >= 3.10
