@@ -1,4 +1,4 @@
-# Testy klasyfikacji stacji kolej/metro z warunkiem 2-tagowym
+# Testy klasyfikacji stacji kolej/metro z warunkiem 2-tagowym-xd
 def is_train_station(tags):
     railway = tags.get("railway")
     pub = tags.get("public_transport")
