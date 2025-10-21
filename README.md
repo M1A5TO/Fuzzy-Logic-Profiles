@@ -49,4 +49,28 @@ Each partial component is normalized to [0 – 1]:
 ---
 
 ##  POI Scoring Logic
-...
+
+For each apartment–POI pair, the system computes:
+
+1. **Distance component**  (temporary solution)
+
+   Using the [Haversine formula](https://en.wikipedia.org/wiki/Haversine_formula)  
+   → mapped through a trapezoidal fuzzy function  
+   → full score for ≤ 400 m, fades out to zero beyond 2 km.
+
+2. **Coverage component**  
+   Measures how many POIs of the same type exist within 1200 m:  
+   \[
+   f_{cov}(n) = 1 - e^{-n / k}
+   \]
+   (where `k` controls saturation).
+
+3. **Final POI feature:**  
+   \[
+   POI_{feature} = α·f_{dist} + (1-α)·f_{cov}
+   \]
+   with α = 0.6 by default.
+
+Negative weights (e.g. for clubs in *family* profile) act as **penalties**, reducing the overall score.
+
+---
