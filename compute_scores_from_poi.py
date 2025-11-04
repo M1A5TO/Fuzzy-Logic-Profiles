@@ -1,12 +1,15 @@
 # compute_scores_from_poi.py
 # Użycie:
-#   python compute_scores_from_poi.py "C:\ścieżka\gdynia_poi_filtered.csv"
+#   python compute_scores_from_poi.py "C:\path\gdynia_poi_filtered.csv" "C:\path\offers.csv"
 #
-# Wejście: CSV z kolumnami min. [kategoria, lat, lon]
+# Wejście:
+#   - POI CSV z kolumnami min. [kategoria, lat, lon]
+#   - OFFERS CSV z kolumnami min. [offer_id, lat, lon] (+ opcjonalnie price_per_m2, area_m2, price_amount, price_currency, rooms, url, itp.)
+#
 # Wyjście:
-#   - apartments_simulated.csv            (lista mieszkań losowych w bbox POI)
-#   - apartments_poi_scores.csv          (wyniki per mieszkanie x kategoria)
-#   - apartments_summary.csv             (zestawienie zbiorcze per mieszkanie)
+#   - apartments_offers.csv            (lista mieszkań z ofert, zmapowana do [apt_id, lat, lon, price_pln_m2, size_m2, photos_count])
+#   - apartments_poi_scores.csv        (wyniki per mieszkanie x kategoria)
+#   - apartments_summary.csv           (zestawienie zbiorcze per mieszkanie)
 
 import sys
 from pathlib import Path
@@ -19,15 +22,8 @@ from typing import Dict, Tuple
 # promień do coverage (metry)
 RADIUS_M = 1200.0
 
-# miksowanie odległości i pokrycia
-ALPHA = 0.6  # 0.6 * distance_score + 0.4 * coverage_score
-
-# liczba mieszkań do zasymulowania
-N_APTS = 40
-RANDOM_SEED = 42
-
 # progi trapezu dla distance_score (a <= b <= c), w metrach
-# możesz personalizować per kategorię (tu rozsądne defaulty)
+# (te progi wykorzystujemy też do fuzzification dystansu: Near/Mid/Far)
 DIST_THRESHOLDS: Dict[str, Tuple[float, float, float]] = {
     # krytyczne
     "szpital_przychodnia": (400, 1200, 2000),
@@ -53,7 +49,7 @@ DIST_THRESHOLDS: Dict[str, Tuple[float, float, float]] = {
     "bank_atm":            (600, 1500, 2500),
 }
 
-# parametry saturacji coverage (im mniejsze k, tym szybciej rośnie do 1)
+# skale coverage (k – im mniejsze, tym szybciej nasyca się do 1)
 COVERAGE_K: Dict[str, float] = {
     "szpital_przychodnia": 1.0,
     "apteka":              2.0,
@@ -76,103 +72,154 @@ COVERAGE_K: Dict[str, float] = {
     "bank_atm":            1.5,
 }
 
-
-# ---------- FUNKCJE POMOCNICZE ----------
+# ---------- FUNKCJE GEO ----------
 
 def haversine_m(lat1, lon1, lat2, lon2):
-    """
-    Odległość w metrach między (lat1,lon1) i (lat2,lon2) — wektorowo (lat2/lon2 mogą być tablicami).
-    """
-    R = 6371000.0  # promień Ziemi (m)
+    R = 6371000.0  # m
     phi1 = np.radians(lat1)
     phi2 = np.radians(lat2)
     dphi = np.radians(lat2 - lat1)
     dlmb = np.radians(lon2 - lon1)
-
     a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlmb/2.0)**2
     c = 2*np.arctan2(np.sqrt(a), np.sqrt(1 - a))
     return R * c
 
+# ---------- METRYKI POMOCNICZE ----------
 
 def trapezoid_distance_score(d, a, b, c):
-    """
-    Funkcja trapezowa w metrach: <=a:1, a->b: maleje 1->0, b->c: maleje 0->0 (z lekkim ogonem 0.5*),
-    >c: 0. Tutaj uproszczona: dwa odcinki malejące do 0.
-    """
     d = float(d)
-    if d <= a:
-        return 1.0
-    if d <= b:
-        return (b - d) / (b - a)
-    if d <= c:
-        # słabsza strefa: 0.5 -> 0 (możesz zmienić na łagodniejszą)
-        return 0.5 * (c - d) / (c - b)
+    if d <= a: return 1.0
+    if d <= b: return (b - d) / (b - a)
+    if d <= c: return 0.5 * (c - d) / (c - b)
     return 0.0
-
 
 def coverage_score(n, k):
     k = max(float(k), 1e-6)
     return float(1 - np.exp(-n / k))
 
+# ---------- FUZZY (Sugeno 0-order) DLA POI ----------
 
-# ---------- PIPELINE ----------
+def _clamp01(x: float) -> float:
+    return float(max(0.0, min(1.0, x)))
+
+def dist_memberships(d: float, a: float, b: float, c: float):
+    if d <= a: near = 1.0
+    elif d <= b: near = (b - d) / (b - a)
+    else: near = 0.0
+    if d <= a or d >= c: mid = 0.0
+    elif d == b: mid = 1.0
+    elif d < b: mid = (d - a) / (b - a)
+    else: mid = (c - d) / (c - b)
+    if d <= b: far = 0.0
+    elif d <= c: far = (d - b) / (c - b)
+    else: far = 1.0
+    return {"Near": _clamp01(near), "Mid": _clamp01(mid), "Far": _clamp01(far)}
+
+def cov_memberships(n: int, k: float):
+    k = max(float(k), 1e-6)
+    n = float(max(0, n))
+    if n <= 0: low = 1.0
+    elif n < k: low = (k - n) / k
+    else: low = 0.0
+    left, peak, right = 0.5 * k, 1.0 * k, 1.5 * k
+    if n <= left or n >= right: mid = 0.0
+    elif n == peak: mid = 1.0
+    elif n < peak: mid = (n - left) / (peak - left)
+    else: mid = (right - n) / (right - peak)
+    if n <= k: high = 0.0
+    elif n < 2.0 * k: high = (n - k) / k
+    else: high = 1.0
+    return {"Low": _clamp01(low), "Mid": _clamp01(mid), "High": _clamp01(high)}
+
+def fuzzy_poi_utility(best_dist: float, cnt_in_R: int,
+                      a: float, b: float, c: float, k: float,
+                      category: str) -> float:
+    μd = dist_memberships(best_dist, a, b, c)
+    μc = cov_memberships(cnt_in_R, k)
+    C = {
+        ("Near", "High"): 1.00, ("Near", "Mid"): 0.80, ("Near", "Low"): 0.50,
+        ("Mid",  "High"): 0.70, ("Mid",  "Mid"): 0.50, ("Mid",  "Low"): 0.30,
+        ("Far",  "High"): 0.45, ("Far",  "Mid"): 0.25, ("Far",  "Low"): 0.20,
+    }
+    penalty_scale = 1.0
+    if category in {"pub", "klub"}:
+        penalty_scale = 0.6
+    if category in {"szkola_przedszkole", "plac_zabaw"}:
+        penalty_scale = 0.85
+    num = den = 0.0
+    for d_bin, μd_v in μd.items():
+        if μd_v <= 0: continue
+        for c_bin, μc_v in μc.items():
+            if μc_v <= 0: continue
+            alpha = min(μd_v, μc_v)
+            const = C.get((d_bin, c_bin), 0.30) * penalty_scale
+            num += alpha * const
+            den += alpha
+    return 0.0 if den == 0.0 else float(num / den)
+
+# ---------- I/O ----------
 
 def load_poi(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-    # sanity
     for col in ["kategoria", "lat", "lon"]:
         if col not in df.columns:
             raise ValueError(f"Brak kolumny '{col}' w {csv_path}")
     df = df.dropna(subset=["kategoria", "lat", "lon"])
     return df
 
+def load_offers(offers_path: Path) -> pd.DataFrame:
+    """Mapuje offers.csv → [apt_id, lat, lon, price_pln_m2?, size_m2?, photos_count?]."""
+    df = pd.read_csv(offers_path).copy()
+    for col in ["offer_id", "lat", "lon"]:
+        if col not in df.columns:
+            raise ValueError("offers.csv musi mieć co najmniej kolumny: offer_id, lat, lon")
 
-def simulate_apartments(bbox, n=N_APTS, seed=RANDOM_SEED) -> pd.DataFrame:
-    """
-    Generuje losowe mieszkania w bbox (min_lat, min_lon, max_lat, max_lon).
-    """
-    min_lat, min_lon, max_lat, max_lon = bbox
-    rng = np.random.default_rng(seed)
-    lats = rng.uniform(min_lat, max_lat, size=n)
-    lons = rng.uniform(min_lon, max_lon, size=n)
-    df = pd.DataFrame({
-        "apt_id": [f"A{i:03d}" for i in range(n)],
-        "lat": lats,
-        "lon": lons,
+    out = pd.DataFrame({
+        "apt_id": df["offer_id"].astype(str),
+        "lat": df["lat"].astype(float),
+        "lon": df["lon"].astype(float),
     })
-    return df
+    # size_m2
+    if "area_m2" in df.columns:
+        out["size_m2"] = pd.to_numeric(df["area_m2"], errors="coerce")
+    # price_pln_m2
+    price_pln_m2 = None
+    if "price_per_m2" in df.columns:
+        price_pln_m2 = pd.to_numeric(df["price_per_m2"], errors="coerce")
+    elif {"price_amount", "area_m2", "price_currency"}.issubset(df.columns):
+        m = (df["price_currency"].astype(str).str.upper() == "PLN")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            price_pln_m2 = pd.Series(np.where(
+                m,
+                pd.to_numeric(df["price_amount"], errors="coerce") / pd.to_numeric(df["area_m2"], errors="coerce"),
+                np.nan
+            ))
+    if price_pln_m2 is not None:
+        out["price_pln_m2"] = price_pln_m2
 
+    # photos_count (jeśli w przyszłości dorzucisz)
+    out["photos_count"] = 0
+
+    out = out.dropna(subset=["lat", "lon"])
+    return out
+
+# ---------- LICZENIE ----------
 
 def compute_scores_for_apartment(apt_lat, apt_lon, pois_by_cat: Dict[str, np.ndarray]) -> pd.DataFrame:
-    """
-    Liczy metryki per kategoria dla jednego mieszkania.
-    Zwraca DataFrame: [kategoria, best_dist_m, count_in_R, distance_score, coverage_score, poi_feature]
-    """
     rows = []
     for cat, pts in pois_by_cat.items():
         if pts.size == 0:
-            rows.append({
-                "kategoria": cat,
-                "best_dist_m": np.inf,
-                "count_in_R": 0,
-                "distance_score": 0.0,
-                "coverage_score": 0.0,
-                "poi_feature": 0.0,
-            })
+            rows.append({"kategoria": cat, "best_dist_m": np.inf, "count_in_R": 0,
+                         "distance_score": 0.0, "coverage_score": 0.0, "poi_feature": 0.0})
             continue
-
-        # odległości do wszystkich POI w danej kategorii (wektorowo)
-        dists = haversine_m(apt_lat, apt_lon, pts[:, 0], pts[:, 1])  # pts: [lat, lon]
+        dists = haversine_m(apt_lat, apt_lon, pts[:, 0], pts[:, 1])
         best = float(np.min(dists))
         cnt = int(np.sum(dists <= RADIUS_M))
-
         a, b, c = DIST_THRESHOLDS.get(cat, (600, 1500, 2500))
         k = COVERAGE_K.get(cat, 1.5)
-
         dscore = trapezoid_distance_score(best, a, b, c)
         cscore = coverage_score(cnt, k)
-        feature = ALPHA * dscore + (1 - ALPHA) * cscore
-
+        feature = fuzzy_poi_utility(best, cnt, a, b, c, k, cat)
         rows.append({
             "kategoria": cat,
             "best_dist_m": best,
@@ -181,30 +228,23 @@ def compute_scores_for_apartment(apt_lat, apt_lon, pois_by_cat: Dict[str, np.nda
             "coverage_score": cscore,
             "poi_feature": feature,
         })
-
     return pd.DataFrame(rows)
 
-
-def main(csv_path: Path):
+def main(poi_path: Path, offers_path: Path):
     # 1) POI
-    poi = load_poi(csv_path)
+    poi = load_poi(poi_path)
     cats = sorted(poi["kategoria"].unique().tolist())
 
-    # 2) bbox
-    min_lat, max_lat = poi["lat"].min(), poi["lat"].max()
-    min_lon, max_lon = poi["lon"].min(), poi["lon"].max()
-    bbox = (min_lat, min_lon, max_lat, max_lon)
+    # 2) Oferty → mieszkania
+    apartments = load_offers(offers_path)
 
-    # 3) dane symulacyjne mieszkań
-    apartments = simulate_apartments(bbox, n=N_APTS, seed=RANDOM_SEED)
-
-    # 4) indeks POI per kategoria: tablice [lat, lon]
+    # 3) indeks POI per kategoria: tablice [lat, lon]
     pois_by_cat: Dict[str, np.ndarray] = {}
     for cat in cats:
         sub = poi.loc[poi["kategoria"] == cat, ["lat", "lon"]].to_numpy(dtype=float)
         pois_by_cat[cat] = sub
 
-    # 5) liczenie per mieszkanie
+    # 4) liczenie per mieszkanie
     all_rows = []
     for _, apt in apartments.iterrows():
         apt_id, alat, alon = apt["apt_id"], float(apt["lat"]), float(apt["lon"])
@@ -216,7 +256,7 @@ def main(csv_path: Path):
 
     scores = pd.concat(all_rows, ignore_index=True)
 
-    # 6) podsumowanie per mieszkanie (średnia z poi_feature po wszystkich kategoriach)
+    # 5) podsumowanie per mieszkanie
     summary = scores.groupby("apt_id").agg(
         apt_lat=("apt_lat", "first"),
         apt_lon=("apt_lon", "first"),
@@ -225,23 +265,15 @@ def main(csv_path: Path):
         poi_feature_max=("poi_feature", "max"),
     ).reset_index()
 
-    # top-3 kategorie per mieszkanie (dla interpretowalności)
-    def topk(series, k=3):
-        # series: poi_feature z MultiIndex (apt_id,kategoria) — tu zrobimy merge niżej
-        return ", ".join(series.nlargest(k).index.get_level_values("kategoria"))
-
-    # przygotuj MultiIndex
     tmp = scores.set_index(["apt_id", "kategoria"])["poi_feature"]
-    # zbierz top-3 jako DataFrame
-    top3 = tmp.groupby(level=0, group_keys=False).apply(lambda s: ", ".join(
-        [f"{cat}({val:.2f})" for cat, val in sorted(s.items(), key=lambda x: x[1], reverse=True)[:3]]
-    )).reset_index(name="top3_kategorie")
-
+    top3 = tmp.groupby(level=0, group_keys=False).apply(
+        lambda s: ", ".join([f"{cat}({val:.2f})" for cat, val in sorted(s.items(), key=lambda x: x[1], reverse=True)[:3]])
+    ).reset_index(name="top3_kategorie")
     summary = summary.merge(top3, on="apt_id", how="left")
 
-    # 7) zapisy
-    out_dir = csv_path.parent
-    apartments_path = out_dir / "apartments_simulated.csv"
+    # 6) zapisy
+    out_dir = poi_path.parent
+    apartments_path = out_dir / "apartments_offers.csv"
     scores_path = out_dir / "apartments_poi_scores.csv"
     summary_path = out_dir / "apartments_summary.csv"
 
@@ -256,9 +288,8 @@ def main(csv_path: Path):
     print("\nPrzykład TOP-3 kategorii (pierwsze 5 mieszkań):")
     print(summary[["apt_id", "top3_kategorie"]].head(5).to_string(index=False))
 
-
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Użycie: python compute_scores_from_poi.py C:\\ścieżka\\gdynia_poi_filtered.csv")
+    if len(sys.argv) < 3:
+        print("Użycie: python compute_scores_from_poi.py C:\\ścieżka\\gdynia_poi_filtered.csv C:\\ścieżka\\offers.csv")
         sys.exit(1)
-    main(Path(sys.argv[1]))
+    main(Path(sys.argv[1]), Path(sys.argv[2]))

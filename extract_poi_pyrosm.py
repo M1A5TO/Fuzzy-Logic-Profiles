@@ -26,12 +26,13 @@ CUSTOM_FILTER = {
         "park", "playground", "fitness_centre",
     ],
     "shop": [
-        "supermarket", "convenience", "bakery", "hairdresser", "pet",
+        "supermarket", "convenience", "bakery", "hairdresser", "pet", "mall",  # + mall -> galeria
     ],
     # pojedynczo pobieramy tram_stop i bus_stop,
-    # a metro/SKM/pociągi rozpoznamy później warunkiem 2-tagowym
-    "railway": ["tram_stop"],
+    # a kolej/metro rozpoznamy później (poluzowany warunek tagów)
+    "railway": ["tram_stop", "station", "halt"],  # dodanie station/halt nie zaszkodzi
     "highway": ["bus_stop"],
+    "public_transport": ["station", "halt"],  # by przyciąć późniejszą klasyfikację
 }
 
 # Kolumny, które chcemy zachować (nie wszystkie zawsze występują)
@@ -65,20 +66,17 @@ def to_point_centroid(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     gdf["lat"] = gdf.geometry.y
     return gdf
 
-
 def is_train_station(tags: Dict[str, Any]) -> bool:
-    # Warunek 2-tagowy: public_transport ∈ {station,halt} AND railway ∈ {station,halt}
     railway = tags.get("railway")
     pub = tags.get("public_transport")
     return (railway in {"station", "halt"}) and (pub in {"station", "halt"})
 
-
 def classify_row(row: Dict[str, Optional[str]]) -> Optional[str]:
-    # Najpierw stacje kolej/metro z warunkiem 2-tagowym:
+    # Najpierw stacje kolej/metro:
     if is_train_station({"railway": row.get("railway"), "public_transport": row.get("public_transport")}):
         return "stacja_kolej_metro"
 
-    # Potem reszta kategorii:
+    # Potem reszta kategorii transportowych:
     if row.get("railway") == "tram_stop":
         return "przystanek_tramwaj"
     if row.get("highway") == "bus_stop":
@@ -88,12 +86,21 @@ def classify_row(row: Dict[str, Optional[str]]) -> Optional[str]:
     leisure = row.get("leisure")
     shop = row.get("shop")
 
+    # Sklepy / galerie
+    if shop == "mall":
+        return "galeria"
+    if shop in {"supermarket", "convenience", "bakery"}:
+        return "sklep"
+    if shop == "pet":
+        return "sklep_zoologiczny"
+    if shop == "hairdresser":
+        return "fryzjer"
+
+    # Amenity / leisure
     if amenity in {"hospital", "clinic"}:
         return "szpital_przychodnia"
     if amenity == "pharmacy":
         return "apteka"
-    if shop in {"supermarket", "convenience", "bakery"}:
-        return "sklep"
     if amenity in {"university", "college"}:
         return "uczelnia"
     if leisure == "fitness_centre":
@@ -114,10 +121,6 @@ def classify_row(row: Dict[str, Optional[str]]) -> Optional[str]:
         return "szkola_przedszkole"
     if amenity == "veterinary":
         return "weterynarz"
-    if shop == "pet":
-        return "sklep_zoologiczny"
-    if shop == "hairdresser":
-        return "fryzjer"
     if amenity in {"bank", "atm"}:
         return "bank_atm"
 
@@ -165,9 +168,12 @@ def main(pbf_path: Path) -> None:
 
     # GeoJSON (punktowe geometrie)
     gdf_geo = gdf.copy()
-    # geopandas wymaga kolumny 'geometry' jako aktywnej geometrii
     if "geometry" not in gdf_geo.columns:
-        gdf_geo = gpd.GeoDataFrame(gdf_geo, geometry=gpd.points_from_xy(gdf_geo["lon"], gdf_geo["lat"]), crs="EPSG:4326")
+        gdf_geo = gpd.GeoDataFrame(
+            gdf_geo,
+            geometry=gpd.points_from_xy(gdf_geo["lon"], gdf_geo["lat"]),
+            crs="EPSG:4326"
+        )
     else:
         gdf_geo = gpd.GeoDataFrame(gdf_geo, geometry=gdf_geo["geometry"], crs="EPSG:4326")
 
