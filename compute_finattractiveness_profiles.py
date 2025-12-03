@@ -1,27 +1,6 @@
 # compute_finattractiveness_profiles.py
 # Użycie:
-#   python compute_finattractiveness_profiles.py \
-#       C:\Users\antek\PycharmProjects\PythonProjectMiasto\data\apartments_poi_scores.csv \
-#       C:\Users\antek\PycharmProjects\PythonProjectMiasto\data\apartments_out.json
-#
-# Wejście:
-#   - apartments_poi_scores.csv  (apt_id, kategoria, poi_feature ~ [0,1], opcj. best_time_min)
-#   - apartments_out.json        (lista ofert z kluczami: source_id, price, price_per_m2,
-#                                 room_num, footage, currency, photo_style, photo_ids, ...)
-#
-# Wyjście:
-#   - attractiveness_by_profile.csv
-#   - ranking_<profil>.csv
-#
-# Logika:
-#   - ZACHOWANA cała dotychczasowa logika rozmyta dla:
-#       * POI (W_POI),
-#       * CENA (PRICE_RULES),
-#       * M2 (SIZE_RULES),
-#       * ROOMS (ROOMS_RULES),
-#   - BLOK ZDJ:
-#       * NIE używamy liczby zdjęć,
-#       * ZDJ = ocena stylu mieszkania (photo_style) per profil.
+#   python compute_finattractiveness_profiles.py .\data\apartments_poi_scores.csv .\data\apartments_out.json
 
 from __future__ import annotations
 import sys
@@ -29,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, List
+from dataclasses import dataclass
 
 # ====== KONFIG: wagi POI per profil (warstwa 1) ======
 HIGH, MID, LOW, ZERO = 1.0, 0.65, 0.35, 0.0
@@ -77,35 +57,32 @@ W_POI: Dict[str, Dict[str, float]] = {
     },
 }
 
-# ====== Wagi bloków do fallbacku (POI, CENA, M2, ROOMS, ZDJ) ======
+# ====== Wagi bloków ======
 WB: Dict[str, Dict[str, float]] = {
     "rodzinny":      {"POI": 0.30, "CENA": 0.18, "M2": 0.32, "ROOMS": 0.15, "ZDJ": 0.05},
     "studencki":     {"POI": 0.38, "CENA": 0.34, "M2": 0.12, "ROOMS": 0.11, "ZDJ": 0.05},
     "singiel":       {"POI": 0.25, "CENA": 0.35, "M2": 0.20, "ROOMS": 0.15, "ZDJ": 0.05},
     "wlasciciel_psa":{"POI": 0.42, "CENA": 0.18, "M2": 0.22, "ROOMS": 0.13, "ZDJ": 0.05},
-    "uniwersalny":   {"POI": 0.28, "CENA": 0.24, "M2": 0.24, "ROOMS": 0.09, "ZDJ": 0.15},
+    "uniwersalny":   {"POI": 0.28, "CENA": 0.24, "M2": 0.24, "ROOMS": 0.15, "ZDJ": 0.09},
 }
 
-# ====== Docelowe metraże per profil (dla M2) ======
-SIZE_TARGET: Dict[str, Tuple[float, float]] = {
+# ====== Parametry bloków ======
+SIZE_TARGET = {
     "rodzinny":       (25, 65),
-    "studencki":      (20, 45),
+    "studencki":      (20, 35),
     "singiel":        (20, 45),
     "wlasciciel_psa": (25, 55),
     "uniwersalny":    (22, 55),
 }
 
-# ====== Docelowa liczba pokoi per profil (dla ROOMS) ======
-# Format: (min_ok, target_low, target_high, max_ok)
-ROOMS_TARGET_RANGES: Dict[str, Tuple[float, float, float, float]] = {
-    "rodzinny":       (2.0, 3.0, 4.0, 5.0),  # 3–4 idealne
-    "studencki":      (1.0, 1.0, 2.0, 3.0),  # 1–2 idealne
-    "singiel":        (1.0, 1.0, 1.0, 2.0),  # 1 idealnie
-    "wlasciciel_psa": (2.0, 2.0, 3.0, 4.0),  # 2–3 idealne
-    "uniwersalny":    (2.0, 2.0, 3.0, 4.0),  # 2–3 idealne
+ROOMS_TARGET_RANGES = {
+    "rodzinny":       (2.0, 3.0, 4.0, 5.0),
+    "studencki":      (1.0, 1.0, 2.0, 3.0),
+    "singiel":        (1.0, 1.0, 1.0, 2.0),
+    "wlasciciel_psa": (2.0, 2.0, 3.0, 4.0),
+    "uniwersalny":    (2.0, 2.0, 3.0, 4.0),
 }
 
-# ====== Konsekwencje (Sugeno 0-order) dla 1D bloków ======
 PRICE_RULES = {
     "rodzinny":      {"Cheap": 1.00, "Mid": 0.60, "Expensive": 0.20},
     "studencki":     {"Cheap": 1.00, "Mid": 0.55, "Expensive": 0.10},
@@ -113,6 +90,7 @@ PRICE_RULES = {
     "wlasciciel_psa":{"Cheap": 0.95, "Mid": 0.60, "Expensive": 0.20},
     "uniwersalny":   {"Cheap": 0.95, "Mid": 0.60, "Expensive": 0.25},
 }
+
 SIZE_RULES = {
     "rodzinny":      {"Small": 0.20, "Target": 1.00, "Large": 0.70},
     "studencki":     {"Small": 0.30, "Target": 0.95, "Large": 0.60},
@@ -120,8 +98,8 @@ SIZE_RULES = {
     "wlasciciel_psa":{"Small": 0.25, "Target": 1.00, "Large": 0.75},
     "uniwersalny":   {"Small": 0.30, "Target": 0.95, "Large": 0.70},
 }
+
 ROOMS_RULES = {
-    # Zasada: Target -> wysoka stała; TooFew/TooMany -> obniżenie
     "rodzinny":      {"TooFew": 0.30, "Target": 1.00, "TooMany": 0.60},
     "studencki":     {"TooFew": 0.55, "Target": 0.95, "TooMany": 0.50},
     "singiel":       {"TooFew": 0.60, "Target": 1.00, "TooMany": 0.50},
@@ -129,9 +107,7 @@ ROOMS_RULES = {
     "uniwersalny":   {"TooFew": 0.45, "Target": 0.95, "TooMany": 0.60},
 }
 
-# ====== Ocena stylu mieszkania (PHOTO_STYLE) ======
-STYLE_SCORES: Dict[str, Dict[str, float]] = {
-    #                   old   modern  unknown/brak
+STYLE_SCORES = {
     "rodzinny":      {"old": 0.70, "modern": 0.90, "unknown": 0.80},
     "studencki":     {"old": 0.50, "modern": 1.00, "unknown": 0.75},
     "singiel":       {"old": 0.50, "modern": 1.00, "unknown": 0.75},
@@ -139,10 +115,68 @@ STYLE_SCORES: Dict[str, Dict[str, float]] = {
     "uniwersalny":   {"old": 0.65, "modern": 0.90, "unknown": 0.80},
 }
 
+# ====== Opisy słowne do tagów ======
+POI_DESC = {
+    "High": "bardzo dobra lokalizacja względem usług",
+    "Mid":  "umiarkowanie dobra lokalizacja",
+    "Low":  "słaba lokalizacja względem usług",
+}
+
+PRICE_DESC = {
+    "Cheap":      "niska cena za metr",
+    "Mid":        "średnia cena za metr",
+    "Expensive":  "wysoka cena za metr",
+}
+
+SIZE_DESC = {
+    "Small":  "zbyt mały metraż",
+    "Target": "odpowiedni metraż",
+    "Large":  "duży metraż",
+}
+
+ROOMS_DESC = {
+    "TooFew":  "zbyt mała liczba pokoi",
+    "Target":  "odpowiednia liczba pokoi",
+    "TooMany": "zbyt duża liczba pokoi",
+}
+
+STYLE_DESC = {
+    "modern":  "nowoczesny styl mieszkania",
+    "old":     "starszy, klasyczny styl mieszkania",
+    "unknown": "neutralny styl mieszkania",
+}
+
+
+def _argmax_label(d: Dict[str, float]) -> str:
+    return max(d.items(), key=lambda kv: kv[1])[0]
+
+# ====== Progi cenowe ======
+EXPENSIVE_CITIES = {
+    "warszawa", "kraków", "krakow",
+    "gdańsk", "gdansk",
+    "wrocław", "wroclaw",
+}
+
+PRICE_THRESHOLDS = {
+    "expensive_city": {"cheap_max": 11500, "mid_min": 11500, "mid_max": 14000, "expensive_min": 14000},
+    "normal_city":    {"cheap_max": 8500, "mid_min": 8500, "mid_max": 11000, "expensive_min": 11000},
+}
+
+@dataclass
+class PriceFuzzyConfig:
+    cheap_max: float
+    mid_min: float
+    mid_max: float
+    expensive_min: float
+
+def get_city_tier(city: str | None) -> str:
+    if not city:
+        return "normal_city"
+    return "expensive_city" if str(city).lower() in EXPENSIVE_CITIES else "normal_city"
+
 # ====== Helpery ======
 def _clamp01(x: float) -> float:
     return float(max(0.0, min(1.0, x)))
-
 
 def weighted_mean_signed(values, weights):
     v = np.array(values, float)
@@ -151,535 +185,382 @@ def weighted_mean_signed(values, weights):
         return 0.0
     return float((v * w).sum() / np.abs(w).sum())
 
+# ====== Membership functions ======
+def price_memberships(price: float, cfg: PriceFuzzyConfig) -> Dict[str, float]:
+    x = float(price)
 
-# ====== Fuzzification 1D ======
-def price_memberships(price: float, p10: float, p50: float, p95: float):
-    if price <= p10:
-        cheap = 1.0
-    elif price < p50:
-        cheap = (p50 - price) / (p50 - p10)
-    else:
-        cheap = 0.0
+    if x <= cfg.cheap_max: cheap = 1.0
+    elif x >= cfg.mid_min: cheap = 0.0
+    else: cheap = (cfg.mid_min - x) / (cfg.mid_min - cfg.cheap_max)
 
-    if price <= p50:
-        expensive = 0.0
-    elif price < p95:
-        expensive = (price - p50) / (p95 - p50)
-    else:
-        expensive = 1.0
+    if x <= cfg.cheap_max or x >= cfg.expensive_min: mid = 0.0
+    elif cfg.mid_min <= x <= cfg.mid_max: mid = 1.0
+    elif x < cfg.mid_min: mid = (x - cfg.cheap_max) / (cfg.mid_min - cfg.cheap_max)
+    else: mid = (cfg.expensive_min - x) / (cfg.expensive_min - cfg.mid_max)
 
-    if price <= p10 or price >= p95:
-        mid = 0.0
-    elif price == p50:
-        mid = 1.0
-    elif price < p50:
-        mid = (price - p10) / (p50 - p10)
-    else:
-        mid = (p95 - price) / (p95 - p50)
+    if x <= cfg.mid_max: exp = 0.0
+    elif x >= cfg.expensive_min: exp = 1.0
+    else: exp = (x - cfg.mid_max) / (cfg.expensive_min - cfg.mid_max)
 
-    return {"Cheap": _clamp01(cheap), "Mid": _clamp01(mid), "Expensive": _clamp01(expensive)}
-
+    return {"Cheap": _clamp01(cheap), "Mid": _clamp01(mid), "Expensive": _clamp01(exp)}
 
 def size_memberships(size: float, s_min: float, s_target: float):
     s_max = s_target * 1.35
+    if size <= s_min: small = 1.0
+    elif size < s_target: small = (s_target - size) / (s_target - s_min)
+    else: small = 0.0
 
-    if size <= s_min:
-        small = 1.0
-    elif size < s_target:
-        small = (s_target - size) / (s_target - s_min)
-    else:
-        small = 0.0
+    if size <= s_target: large = 0.0
+    elif size < s_max: large = (size - s_target) / (s_max - s_target)
+    else: large = 1.0
 
-    if size <= s_target:
-        large = 0.0
-    elif size < s_max:
-        large = (size - s_target) / (s_max - s_target)
-    else:
-        large = 1.0
-
-    if size <= s_min or size >= s_max:
-        target = 0.0
-    elif size == s_target:
-        target = 1.0
-    elif size < s_target:
-        target = (size - s_min) / (s_target - s_min)
-    else:
-        target = (s_max - size) / (s_max - s_target)
+    if size <= s_min or size >= s_max: target = 0.0
+    elif size == s_target: target = 1.0
+    elif size < s_target: target = (size - s_min) / (s_target - s_min)
+    else: target = (s_max - size) / (s_max - s_target)
 
     return {"Small": _clamp01(small), "Target": _clamp01(target), "Large": _clamp01(large)}
 
+def rooms_memberships(rooms: float, rmin, rlow, rhigh, rmax):
+    x = float(rooms)
 
-def rooms_memberships(rooms: float, rmin: float, rlow: float, rhigh: float, rmax: float):
-    """
-    Fuzzy z plateau:
-      - Target = 1.0 na całym [rlow, rhigh] (brzegi wliczone),
-      - liniowy najazd 0→1 od rmin do rlow,
-      - liniowy zjazd 1→0 od rhigh do rmax.
-      - TooFew maleje z 1.0 (≤ rmin) do 0.0 przy rlow,
-      - TooMany rośnie z 0.0 (≤ rhigh) do 1.0 przy rmax.
-    """
-    try:
-        x = float(rooms)
-    except Exception:
-        x = np.nan
-    if np.isnan(x):
-        return {"TooFew": 0.0, "Target": 0.0, "TooMany": 0.0}
+    if x <= rmin: few = 1.0
+    elif x < rlow: few = (rlow - x) / (rlow - rmin)
+    else: few = 0.0
 
-    # TooFew
-    if x <= rmin:
-        few = 1.0
-    elif x < rlow:
-        few = (rlow - x) / max(rlow - rmin, 1e-9)
-    else:
-        few = 0.0
+    if x <= rmin or x >= rmax: tgt = 0.0
+    elif x < rlow: tgt = (x - rmin) / (rlow - rmin)
+    elif x <= rhigh: tgt = 1.0
+    else: tgt = (rmax - x) / (rmax - rhigh)
 
-    # Target (trapez z plateau)
-    if rlow == rhigh:
-        # przypadek "igły" (np. singiel: dokładnie 1 pokój)
-        if x == rlow:
-            target = 1.0
-        elif x < rlow and rlow > rmin:
-            target = (x - rmin) / max(rlow - rmin, 1e-9)
-        elif x > rhigh and rmax > rhigh:
-            target = (rmax - x) / max(rmax - rhigh, 1e-9)
-        else:
-            target = 0.0
-    else:
-        if x <= rmin or x >= rmax:
-            target = 0.0
-        elif x < rlow:
-            target = (x - rmin) / max(rlow - rmin, 1e-9)
-        elif x <= rhigh:  # plateau
-            target = 1.0
-        else:  # x > rhigh
-            target = (rmax - x) / max(rmax - rhigh, 1e-9)
+    if x <= rhigh: many = 0.0
+    elif x < rmax: many = (x - rhigh) / (rmax - rhigh)
+    else: many = 1.0
 
-    # TooMany
-    if x <= rhigh:
-        many = 0.0
-    elif x < rmax:
-        many = (x - rhigh) / max(rmax - rhigh, 1e-9)
-    else:
-        many = 1.0
+    return {"TooFew": _clamp01(few), "Target": _clamp01(tgt), "TooMany": _clamp01(many)}
 
-    return {
-        "TooFew":  float(max(0.0, min(1.0, few))),
-        "Target":  float(max(0.0, min(1.0, target))),
-        "TooMany": float(max(0.0, min(1.0, many))),
-    }
+def poi_memberships(x: float):
+    x = _clamp01(x)
+    if x <= 0: low = 1.0
+    elif x < 0.5: low = (0.5 - x) / 0.5
+    else: low = 0.0
 
+    if x <= 0 or x >= 1: mid = 0.0
+    elif x == 0.5: mid = 1.0
+    elif x < 0.5: mid = x / 0.5
+    else: mid = (1 - x) / 0.5
 
-def sugeno_single_input(memberships: Dict[str, float], rule_consts: Dict[str, float]) -> float:
-    num = den = 0.0
-    for bin_name, mu in memberships.items():
-        if mu <= 0:
-            continue
-        c = float(rule_consts.get(bin_name, 0.5))
-        num += mu * c
-        den += mu
-    return 0.0 if den == 0 else float(num / den)
+    if x <= 0.5: high = 0.0
+    else: high = (x - 0.5) / 0.5
 
+    return {"Low": low, "Mid": mid, "High": high}
 
-# ====== POI → Low/Med/High ======
-def poi_memberships(poi_score: float):
-    x = _clamp01(float(poi_score))
+# ====== Reguły końcowe ======
+Rule = Tuple[Dict[str,str], float]
 
-    if x <= 0.0:
-        low = 1.0
-    elif x < 0.5:
-        low = (0.5 - x) / 0.5
-    else:
-        low = 0.0
-
-    if x <= 0.0 or x >= 1.0:
-        mid = 0.0
-    elif x == 0.5:
-        mid = 1.0
-    elif x < 0.5:
-        mid = (x - 0.0) / 0.5
-    else:
-        mid = (1.0 - x) / 0.5
-
-    if x <= 0.5:
-        high = 0.0
-    else:
-        high = (x - 0.5) / 0.5
-
-    return {"Low": _clamp01(low), "Mid": _clamp01(mid), "High": _clamp01(high)}
-
-
-# ====== Reguły końcowe (jak wcześniej, bez PHOTOS) ======
-Rule = Tuple[Dict[str, str], float]
-
-FINAL_RULES: Dict[str, List[Rule]] = {
+FINAL_RULES = {
     "rodzinny": [
-        ({"POI": "High", "PRICE": "Cheap", "SIZE": "Target", "ROOMS": "Target"}, 1.00),
-        ({"POI": "High", "PRICE": "Mid",  "SIZE": "Target", "ROOMS": "Target"}, 0.92),
-        ({"POI": "High", "ROOMS": "TooFew"},                                0.55),
-        ({"POI": "High", "SIZE": "Small"},                                  0.60),
-        ({"POI": "Mid",  "PRICE": "Cheap", "SIZE": "Target", "ROOMS": "Target"}, 0.85),
-        ({"PRICE": "Expensive", "POI": "Low"},                              0.20),
-        ({"POI": "High"},                                                  0.75),
-        ({"POI": "Low"},                                                   0.35),
+        ({"POI":"High","PRICE":"Cheap","SIZE":"Target","ROOMS":"Target"},1.00),
+        ({"POI":"High","PRICE":"Mid","SIZE":"Target","ROOMS":"Target"},0.92),
+        ({"POI":"High","ROOMS":"TooFew"},0.55),
+        ({"POI":"High","SIZE":"Small"},0.60),
+        ({"POI":"Mid","PRICE":"Cheap","SIZE":"Target","ROOMS":"Target"},0.85),
+        ({"PRICE":"Expensive","POI":"Low"},0.20),
+        ({"POI":"High"},0.75),
+        ({"POI":"Low"},0.35),
     ],
     "studencki": [
-        ({"POI": "High", "PRICE": "Cheap", "ROOMS": "Target"},              1.00),
-        ({"POI": "High", "PRICE": "Mid",   "ROOMS": "Target"},              0.90),
-        ({"POI": "Mid",  "PRICE": "Cheap", "ROOMS": "Target"},              0.86),
-        ({"POI": "High", "ROOMS": "TooMany"},                               0.60),
-        ({"PRICE": "Expensive", "POI": "Low"},                              0.15),
-        ({"POI": "High"},                                                  0.80),
-        ({"POI": "Low"},                                                   0.30),
+        ({"POI":"High","PRICE":"Cheap","ROOMS":"Target"},1.00),
+        ({"POI":"High","PRICE":"Mid","ROOMS":"Target"},0.90),
+        ({"POI":"Mid","PRICE":"Cheap","ROOMS":"Target"},0.86),
+        ({"POI":"High","ROOMS":"TooMany"},0.60),
+        ({"PRICE":"Expensive","POI":"Low"},0.15),
+        ({"POI":"High"},0.80),
+        ({"POI":"Low"},0.30),
     ],
     "singiel": [
-        ({"POI": "High", "PRICE": "Cheap", "ROOMS": "Target"},              0.97),
-        ({"POI": "High", "PRICE": "Mid",   "ROOMS": "Target"},              0.88),
-        ({"POI": "High", "SIZE": "Target", "ROOMS": "Target"},              0.90),
-        ({"POI": "Low",  "PRICE": "Expensive"},                             0.20),
-        ({"POI": "High", "ROOMS": "TooMany"},                               0.60),
-        ({"POI": "High"},                                                  0.78),
-        ({"POI": "Low"},                                                   0.35),
+        ({"POI":"High","PRICE":"Cheap","ROOMS":"Target"},0.97),
+        ({"POI":"High","PRICE":"Mid","ROOMS":"Target"},0.88),
+        ({"POI":"High","SIZE":"Target","ROOMS":"Target"},0.90),
+        ({"POI":"Low","PRICE":"Expensive"},0.20),
+        ({"POI":"High","ROOMS":"TooMany"},0.60),
+        ({"POI":"High"},0.78),
+        ({"POI":"Low"},0.35),
     ],
     "wlasciciel_psa": [
-        ({"POI": "High", "PRICE": "Cheap", "SIZE": "Large",  "ROOMS": "Target"}, 1.00),
-        ({"POI": "High", "PRICE": "Mid",   "SIZE": "Large",  "ROOMS": "Target"}, 0.90),
-        ({"POI": "High", "SIZE": "Target", "ROOMS": "Target"},               0.88),
-        ({"POI": "Low",  "PRICE": "Expensive"},                              0.20),
-        ({"POI": "High"},                                                   0.80),
-        ({"POI": "Low"},                                                    0.30),
+        ({"POI":"High","PRICE":"Cheap","SIZE":"Large","ROOMS":"Target"},1.00),
+        ({"POI":"High","PRICE":"Mid","SIZE":"Large","ROOMS":"Target"},0.90),
+        ({"POI":"High","SIZE":"Target","ROOMS":"Target"},0.88),
+        ({"POI":"Low","PRICE":"Expensive"},0.20),
+        ({"POI":"High"},0.80),
+        ({"POI":"Low"},0.30),
     ],
     "uniwersalny": [
-        ({"POI": "High", "PRICE": "Cheap", "SIZE": "Target", "ROOMS": "Target"}, 0.98),
-        ({"POI": "High", "PRICE": "Mid",   "SIZE": "Target", "ROOMS": "Target"}, 0.90),
-        ({"POI": "Mid",  "PRICE": "Cheap", "ROOMS": "Target"},               0.82),
-        ({"POI": "Low",  "PRICE": "Expensive"},                              0.22),
-        ({"POI": "High"},                                                   0.76),
-        ({"POI": "Low"},                                                    0.35),
+        ({"POI":"High","PRICE":"Cheap","SIZE":"Target","ROOMS":"Target"},0.98),
+        ({"POI":"High","PRICE":"Mid","SIZE":"Target","ROOMS":"Target"},0.90),
+        ({"POI":"Mid","PRICE":"Cheap","ROOMS":"Target"},0.82),
+        ({"POI":"Low","PRICE":"Expensive"},0.22),
+        ({"POI":"High"},0.76),
+        ({"POI":"Low"},0.35),
     ],
 }
 
-
-def rule_activation(
-    rule_cond: Dict[str, str],
-    mu_poi: Dict[str, float],
-    mu_price: Dict[str, float],
-    mu_size: Dict[str, float],
-    mu_rooms: Dict[str, float],
-) -> float:
+def rule_activation(cond, mu_poi, mu_price, mu_size, mu_rooms):
     mus = []
-    if "POI" in rule_cond:
-        mus.append(mu_poi.get(rule_cond["POI"], 0.0))
-    if "PRICE" in rule_cond:
-        mus.append(mu_price.get(rule_cond["PRICE"], 0.0))
-    if "SIZE" in rule_cond:
-        mus.append(mu_size.get(rule_cond["SIZE"], 0.0))
-    if "ROOMS" in rule_cond:
-        mus.append(mu_rooms.get(rule_cond["ROOMS"], 0.0))
-    if not mus:
-        return 0.0
-    return float(min(mus))
-
+    if "POI" in cond: mus.append(mu_poi[cond["POI"]])
+    if "PRICE" in cond: mus.append(mu_price[cond["PRICE"]])
+    if "SIZE" in cond: mus.append(mu_size[cond["SIZE"]])
+    if "ROOMS" in cond: mus.append(mu_rooms[cond["ROOMS"]])
+    return min(mus) if mus else 0.0
 
 def fuzzy_final_attractiveness(
-    profile: str,
-    poi_score: float,
-    price: float, p10: float, p50: float, p95: float,
-    size: float, s_min: float, s_target: float,
-    rooms: float, rmin: float, rlow: float, rhigh: float, rmax: float,
-    fallback_weighted: float,
-) -> float:
-    """
-    Uwaga: FINAŁOWA logika fuzzy NIE używa liczby zdjęć.
-    ZDJ (styl) wpływa tylko przez fallback (WB[prof]["ZDJ"]).
-    """
+    profile, poi_score, price, price_cfg, size, s_min, s_target,
+    rooms, rmin, rlow, rhigh, rmax, fallback
+):
     mu_poi = poi_memberships(poi_score)
-    mu_price = price_memberships(price, p10, p50, p95)
+    mu_price = price_memberships(price, price_cfg)
     mu_size = size_memberships(size, s_min, s_target)
     mu_rooms = rooms_memberships(rooms, rmin, rlow, rhigh, rmax)
 
     num = den = 0.0
     for cond, const in FINAL_RULES[profile]:
-        alpha = rule_activation(cond, mu_poi, mu_price, mu_size, mu_rooms)
-        if alpha <= 0:
-            continue
-        num += alpha * const
-        den += alpha
+        a = rule_activation(cond, mu_poi, mu_price, mu_size, mu_rooms)
+        if a > 0:
+            num += a * const
+            den += a
+    return fallback if den == 0 else num/den
 
-    if den <= 1e-6:
-        return fallback_weighted
-    return float(num / den)
+# ====== Styl ======
+def style_score_for_profile(profile: str, raw):
+    key = str(raw).lower() if isinstance(raw, str) else "unknown"
+    if key not in ("old","modern"): key = "unknown"
+    return STYLE_SCORES[profile].get(key, STYLE_SCORES[profile]["unknown"])
 
+# ====== Dane wejściowe ======
+def load_scores(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    req = {"apt_id","kategoria","poi_feature"}
+    if not req.issubset(df.columns):
+        raise ValueError(f"Brak kolumn: {req - set(df.columns)}")
+    return df.groupby(["apt_id","kategoria"],as_index=False).agg({"poi_feature":"mean"})
 
-# ====== Styl mieszkania ======
-def style_score_for_profile(profile: str, style_raw) -> float:
-    """
-    style_raw: np. "old", "modern", None
-    """
-    if isinstance(style_raw, str):
-        key = style_raw.strip().lower()
-    else:
-        key = "unknown"
+def _extract_city(df):
+    for col in ["city","miejscowosc","miejscowość","location_city","locality"]:
+        if col in df.columns:
+            return df[col]
+    return pd.Series([None]*len(df))
 
-    if key not in ("old", "modern"):
-        key = "unknown"
-
-    prof_rules = STYLE_SCORES.get(profile, STYLE_SCORES["uniwersalny"])
-    return float(prof_rules.get(key, prof_rules["unknown"]))
-
-
-# ====== I/O ======
-def load_scores(scores_path: Path) -> pd.DataFrame:
-    scores = pd.read_csv(scores_path)
-    required = {"apt_id", "kategoria", "poi_feature"}
-    missing = required - set(scores.columns)
-    if missing:
-        raise ValueError(f"Brakuje kolumn w apartments_poi_scores.csv: {missing}")
-
-    # FIX duplikatów: agregujemy po (apt_id, kategoria)
-    agg_dict = {"poi_feature": "mean"}
-    if "best_time_min" in scores.columns:
-        agg_dict["best_time_min"] = "mean"
-
-    scores = scores.groupby(["apt_id", "kategoria"], as_index=False).agg(agg_dict)
-    return scores
-
-
-def load_apartments_from_json(json_path: Path) -> pd.DataFrame:
-    """
-    Ładuje apartments_out.json:
-      - apt_id = source_id (string),
-      - price_pln_m2: z price_per_m2 lub price/footage jeśli PLN,
-      - size_m2 = footage,
-      - rooms = room_num,
-      - photos_count = len(photo_ids) (tylko informacyjnie),
-      - photo_style = photo_style (old/modern/...).
-    """
-    df = pd.read_json(json_path)
-
+def load_apartments_from_json(path: Path) -> pd.DataFrame:
+    df = pd.read_json(path)
     if "source_id" not in df.columns:
-        raise ValueError("apartments_out.json musi mieć pole 'source_id' dla każdej oferty")
+        raise ValueError("Brak source_id w JSON")
 
     out = pd.DataFrame()
     out["apt_id"] = df["source_id"].astype(str)
+    out["city"]   = _extract_city(df)
 
-    # cena za m2
     if "price_per_m2" in df.columns and df["price_per_m2"].notna().any():
-        out["price_pln_m2"] = pd.to_numeric(df["price_per_m2"], errors="coerce")
+        out["price_pln_m2"] = pd.to_numeric(df["price_per_m2"],errors="coerce")
     else:
-        price = pd.to_numeric(df.get("price", np.nan), errors="coerce")
-        area = pd.to_numeric(df.get("footage", np.nan), errors="coerce")
-        curr = df.get("currency", "PLN").astype(str).str.upper()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            out["price_pln_m2"] = np.where(
-                curr == "PLN",
-                price / area,
-                np.nan
-            )
+        price = pd.to_numeric(df.get("price",np.nan),errors="coerce")
+        area  = pd.to_numeric(df.get("footage",np.nan),errors="coerce")
+        curr  = df.get("currency","PLN").astype(str).str.upper()
+        out["price_pln_m2"] = np.where(curr=="PLN", price/area, np.nan)
 
-    # metraż
-    out["size_m2"] = pd.to_numeric(df.get("footage", np.nan), errors="coerce")
+    out["size_m2"] = pd.to_numeric(df.get("footage",np.nan),errors="coerce")
+    out["rooms"]   = pd.to_numeric(df.get("room_num",np.nan),errors="coerce")
+    out["photo_style"] = df.get("photo_style",None)
 
-    # pokoje
-    out["rooms"] = pd.to_numeric(df.get("room_num", np.nan), errors="coerce")
+    return out.drop_duplicates("apt_id")
 
-    # liczba zdjęć — tylko informacyjnie, NIE wchodzi do logiki fuzzy
-    if "photo_ids" in df.columns:
-        out["photos_count"] = df["photo_ids"].apply(
-            lambda xs: len(xs) if isinstance(xs, (list, tuple)) else 0
-        )
-    else:
-        out["photos_count"] = 0
-
-    # styl mieszkania
-    if "photo_style" in df.columns:
-        out["photo_style"] = df["photo_style"]
-    else:
-        out["photo_style"] = None
-
-    # usuwamy duplikaty apt_id, bierzemy pierwszy
-    out = out.drop_duplicates(subset=["apt_id"], keep="first").reset_index(drop=True)
-    return out
-
-
-def fill_missing_attributes(apts: pd.DataFrame, seed=123) -> pd.DataFrame:
-    """Wypełnia WYŁĄCZNIE braki; nie nadpisuje danych z JSON-a."""
-    rng = np.random.default_rng(seed)
-    out = apts.copy()
-
-    # price
-    if "price_pln_m2" not in out.columns or out["price_pln_m2"].isna().all():
-        base = rng.normal(12500, 1800, size=len(out))
-        base = np.clip(base, 8000, 20000)
-        out["price_pln_m2"] = base.round(0)
-    else:
-        mask = out["price_pln_m2"].isna()
-        if mask.any():
-            base = rng.normal(12500, 1800, size=mask.sum())
-            base = np.clip(base, 8000, 20000)
-            out.loc[mask, "price_pln_m2"] = base.round(0)
-
-    # size
-    if "size_m2" not in out.columns or out["size_m2"].isna().all():
-        size = rng.normal(48, 14, size=len(out))
-        size = np.clip(size, 18, 85)
-        out["size_m2"] = size.round(1)
-    else:
-        mask = out["size_m2"].isna()
-        if mask.any():
-            size = rng.normal(48, 14, size=mask.sum())
-            size = np.clip(size, 18, 85)
-            out.loc[mask, "size_m2"] = size.round(1)
-
-    # rooms — jeśli brak, heurystycznie z metrażu
-    if "rooms" not in out.columns:
-        out["rooms"] = np.nan
-    mask_r = out["rooms"].isna()
-    if mask_r.any():
-        bins = np.array([0, 28, 45, 65, 85, 1e9], dtype=float)
-        vals = np.array([1, 2, 3, 4, 5], dtype=float)
-        sizes = out.loc[mask_r, "size_m2"].astype(float).to_numpy()
-        idx = np.digitize(sizes, bins, right=True) - 1
-        est = vals[np.clip(idx, 0, len(vals) - 1)]
-        out.loc[mask_r, "rooms"] = est
-
-    # photos_count zostawiamy jak jest (tylko info)
-    if "photos_count" not in out.columns:
-        out["photos_count"] = 0
-
-    # photo_style – braki obsłuży style_score_for_profile()
-    if "photo_style" not in out.columns:
-        out["photo_style"] = None
-
-    return out
-
-
-# ====== GŁÓWNA LOGIKA ======
-def compute_blocks_and_final(scores: pd.DataFrame, apts: pd.DataFrame) -> pd.DataFrame:
-    # kwantyle ceny (dla całego zbioru)
-    p10 = float(np.percentile(apts["price_pln_m2"], 10))
-    p50 = float(np.percentile(apts["price_pln_m2"], 50))
-    p95 = float(np.percentile(apts["price_pln_m2"], 95))
-
-    # pivot POI: apt_id x kategoria → poi_feature
-    piv = scores.pivot_table(
-        index="apt_id",
-        columns="kategoria",
-        values="poi_feature",
-        aggfunc="mean"
-    ).fillna(0.0)
+# ====== Główna logika ======
+def compute_blocks_and_final(scores, apts):
+    piv = scores.pivot_table(index="apt_id",columns="kategoria",values="poi_feature",aggfunc="mean").fillna(0)
     piv.columns.name = None
 
-    # upewniamy się, że wszystkie kategorie z W_POI istnieją
-    all_cats = sorted(set().union(*[set(d.keys()) for d in W_POI.values()]))
-    for cat in all_cats:
-        if cat not in piv.columns:
-            piv[cat] = 0.0
+    all_cats = sorted({c for d in W_POI.values() for c in d})
+    for c in all_cats:
+        if c not in piv.columns:
+            piv[c] = 0.0
 
     rows = []
-    for apt_id, row in piv.iterrows():
-        apt_row = apts.loc[apts["apt_id"] == apt_id]
-        if apt_row.empty:
+    for apt_id, poi_row in piv.iterrows():
+        apt = apts.loc[apts["apt_id"]==apt_id]
+        if apt.empty:
             continue
+        apt = apt.iloc[0]
 
-        price = float(apt_row["price_pln_m2"].iloc[0])
-        size = float(apt_row["size_m2"].iloc[0])
-        photos_count = int(apt_row["photos_count"].iloc[0])  # tylko info
-        rooms = float(apt_row["rooms"].iloc[0])
-        style_raw = apt_row["photo_style"].iloc[0] if "photo_style" in apt_row.columns else None
+        price = float(apt["price_pln_m2"])
+        size  = float(apt["size_m2"])
+        rooms = float(apt["rooms"])
+        style_raw = apt["photo_style"]
+        city = apt["city"]
 
-        for prof, weights in W_POI.items():
-            # 1) POI
-            cats = list(weights.keys())
-            vals = [float(row.get(c, 0.0)) for c in cats]
-            wts = [float(weights[c]) for c in cats]
+        tier = get_city_tier(city)
+        price_cfg = PriceFuzzyConfig(**PRICE_THRESHOLDS[tier])
+
+        for prof in W_POI.keys():
+
+            # 1) POI weighted sum
+            cats = list(W_POI[prof].keys())
+            vals = [poi_row[c] for c in cats]
+            wts  = [W_POI[prof][c] for c in cats]
             poi_score = weighted_mean_signed(vals, wts)
 
-            # 2) Fuzzy 1D bloków
+            # 2) Sugeno 1D
             smin, starget = SIZE_TARGET[prof]
             rmin, rlow, rhigh, rmax = ROOMS_TARGET_RANGES[prof]
 
-            price_s = sugeno_single_input(
-                price_memberships(price, p10, p50, p95), PRICE_RULES[prof]
+            price_s = np.average(
+                [PRICE_RULES[prof][k] for k in ["Cheap","Mid","Expensive"]],
+                weights=list(price_memberships(price,price_cfg).values())
             )
-            m2_s = sugeno_single_input(
-                size_memberships(size, smin, starget), SIZE_RULES[prof]
+            size_s = np.average(
+                [SIZE_RULES[prof][k] for k in ["Small","Target","Large"]],
+                weights=list(size_memberships(size,smin,starget).values())
+            )
+            rooms_s = np.average(
+                [ROOMS_RULES[prof][k] for k in ["TooFew","Target","TooMany"]],
+                weights=list(rooms_memberships(rooms,rmin,rlow,rhigh,rmax).values())
             )
 
-            rooms_s = sugeno_single_input(
-                rooms_memberships(rooms, rmin, rlow, rhigh, rmax), ROOMS_RULES[prof]
-            )
-
-            # 3) Styl mieszkania → blok ZDJ
+            # 3) styl
             style_s = style_score_for_profile(prof, style_raw)
-            photo_s = style_s  # liczba zdjęć ignorowana
 
-            # 4) Fallback — ważenie bloków (POI, CENA, M2, ROOMS, ZDJ)
-            wblk = WB[prof]
-            num_fb = (
-                wblk["POI"] * poi_score +
-                wblk["CENA"] * price_s +
-                wblk["M2"] * m2_s +
-                wblk["ROOMS"] * rooms_s +
-                wblk["ZDJ"] * photo_s
-            )
-            den_fb = sum(wblk.values())
-            fallback = float(num_fb / den_fb if den_fb > 0 else 0.0)
+            # 4) fallback – pełny (POI, CENA, M2, ROOMS, ZDJ)
+            w = WB[prof]
+            num_fb_full = (w["POI"]*poi_score + w["CENA"]*price_s + w["M2"]*size_s +
+                           w["ROOMS"]*rooms_s + w["ZDJ"]*style_s)
+            fallback_full = num_fb_full / sum(w.values())
 
-            # 5) Końcowe fuzzy (Sugeno wielowymiarowe)
-            final = fuzzy_final_attractiveness(
-                prof,
-                poi_score,
-                price, p10, p50, p95,
+            # 5) wynik Sugeno
+            final_sugeno = fuzzy_final_attractiveness(
+                prof, poi_score, price, price_cfg,
                 size, smin, starget,
                 rooms, rmin, rlow, rhigh, rmax,
-                fallback_weighted=fallback
+                fallback_full
             )
 
-            # 6) Uzasadnienia dla POI (TOP±)
-            contrib = pd.Series({c: weights[c] * row.get(c, 0.0) for c in cats})
-            top_plus = ", ".join(
-                f"{c}(+{contrib[c]:.2f})"
-                for c in contrib.sort_values(ascending=False).head(3).index
+            # 6) dodatkowy „miękki” wpływ liczby pokoi i stylu
+            num_rs = w["ROOMS"]*rooms_s + w["ZDJ"]*style_s
+            den_rs = w["ROOMS"] + w["ZDJ"]
+            fallback_rs = num_rs / den_rs if den_rs > 0 else 0.0
+
+            alpha = 0.8  # 80% decyzji z reguł, 20% z bloków ROOMS+ZDJ
+            final = alpha * final_sugeno + (1.0 - alpha) * fallback_rs
+
+            # 7) wersja float + uint16
+            atrak_float = float(round(final, 4))
+            atrak_u16 = int(
+                np.clip(
+                    round(final * 65535.0),
+                    0,
+                    65535
+                )
             )
-            top_minus = ", ".join(
-                f"{c}({contrib[c]:.2f})"
-                for c in contrib.sort_values().head(3).index
-            )
+
+            # 8) uzasadnienia POI
+            contrib = pd.Series({c: W_POI[prof][c]*poi_row[c] for c in cats})
+            top_plus = ", ".join(f"{c}(+{contrib[c]:.2f})" for c in contrib.nlargest(3).index)
+            top_minus = ", ".join(f"{c}({contrib[c]:.2f})" for c in contrib.nsmallest(3).index)
 
             rows.append({
                 "apt_id": apt_id,
                 "profile": prof,
-                "POI": round(poi_score, 4),
-                "CENA": round(price_s, 4),
-                "M2": round(m2_s, 4),
-                "ROOMS": round(rooms_s, 4),
-                "ZDJ": round(photo_s, 4),
-                "ATRAKCYJNOSC": round(final, 4),
-                "price_pln_m2": round(price, 0),
-                "size_m2": round(size, 1),
+                "POI": round(poi_score,4),
+                "CENA": round(price_s,4),
+                "M2": round(size_s,4),
+                "ROOMS": round(rooms_s,4),
+                "ZDJ": round(style_s,4),
+                "ATRAKCYJNOSC": atrak_float,
+                "ATRAKCYJNOSC_U16": atrak_u16,
+                "price_pln_m2": price,
+                "size_m2": size,
                 "rooms": int(round(rooms)),
-                "photos_count": photos_count,
-                "photo_style": style_raw if isinstance(style_raw, str) else None,
-                "STYLE_SCORE": round(style_s, 4),
+                "photo_style": style_raw,
+                "STYLE_SCORE": round(style_s,4),
+                "city": city,
+                "PRICE_TIER": tier,
                 "TOP_PLUS": top_plus,
                 "TOP_MINUS": top_minus,
             })
+
     return pd.DataFrame(rows)
 
+# ====== Opisy słowne dla profilu 'uniwersalny' ======
+def make_descriptions_uniwersalny(df: pd.DataFrame, out_dir: Path) -> None:
+    df_u = df[df["profile"] == "uniwersalny"].copy()
+    if df_u.empty:
+        return
 
-def save_rankings(df: pd.DataFrame, out_dir: Path, topn=30):
-    out_all = out_dir / "attractiveness_by_profile.csv"
-    df.to_csv(out_all, index=False, encoding="utf-8")
+    def _build(row: pd.Series) -> str:
+        try:
+            apt_id = str(row["apt_id"])
+            profile = str(row["profile"])
 
+            mu_poi = poi_memberships(float(row["POI"]))
+            poi_label = _argmax_label(mu_poi)
+            poi_desc = POI_DESC.get(poi_label, poi_label)
+
+            city = row.get("city", None)
+            tier = get_city_tier(city)
+            price_cfg = PriceFuzzyConfig(**PRICE_THRESHOLDS[tier])
+            price_val = float(row["price_pln_m2"])
+            mu_price = price_memberships(price_val, price_cfg)
+            price_label = _argmax_label(mu_price)
+            price_desc = PRICE_DESC.get(price_label, price_label)
+
+            smin, starget = SIZE_TARGET["uniwersalny"]
+            size_val = float(row["size_m2"])
+            mu_size = size_memberships(size_val, smin, starget)
+            size_label = _argmax_label(mu_size)
+            size_desc = SIZE_DESC.get(size_label, size_label)
+
+            rmin, rlow, rhigh, rmax = ROOMS_TARGET_RANGES["uniwersalny"]
+            rooms_val = float(row["rooms"])
+            mu_rooms = rooms_memberships(rooms_val, rmin, rlow, rhigh, rmax)
+            rooms_label = _argmax_label(mu_rooms)
+            rooms_desc = ROOMS_DESC.get(rooms_label, rooms_label)
+
+            style_raw = row.get("photo_style", "")
+            if isinstance(style_raw, str) and style_raw.strip():
+                skey = style_raw.strip().lower()
+                style_text = STYLE_DESC.get(skey, STYLE_DESC["unknown"])
+            else:
+                style_text = STYLE_DESC["unknown"]
+
+            atrak = float(row.get("ATRAKCYJNOSC", 0.0))
+
+            return (
+                f"{apt_id}, {profile}, {style_text}, "
+                f"{poi_desc}, {price_desc}, {size_desc}, {rooms_desc}, "
+                f"wynik = {atrak:.2f}"
+            )
+        except Exception:
+            return ""
+
+    df_u["INTERPRETACJA"] = df_u.apply(_build, axis=1)
+    desc = df_u[["apt_id", "INTERPRETACJA"]].copy()
+    desc = desc[desc["INTERPRETACJA"] != ""].drop_duplicates("apt_id")
+
+    if desc.empty:
+        return
+
+    out_path = out_dir / "descriptions_uniwersalny.csv"
+    desc.to_csv(out_path, index=False, encoding="utf-8")
+    print("[OK] Zapisano opisy (uniwersalny):", out_path)
+
+def save_rankings(df, out_dir: Path, topn=30):
+    df.to_csv(out_dir/"attractiveness_by_profile.csv",index=False,encoding="utf-8")
     for prof in df["profile"].unique():
-        sub = df[df["profile"] == prof].sort_values("ATRAKCYJNOSC", ascending=False)
-        sub.head(topn).to_csv(out_dir / f"ranking_{prof}.csv", index=False, encoding="utf-8")
+        df[df["profile"]==prof].sort_values("ATRAKCYJNOSC",ascending=False)\
+            .head(topn).to_csv(out_dir/f"ranking_{prof}.csv",index=False)
 
+    make_descriptions_uniwersalny(df, out_dir)
 
 def main():
-    if len(sys.argv) < 3:
-        print("Użycie: python compute_finattractiveness_profiles.py "
-              "PATH_TO_apartments_poi_scores.csv PATH_TO_apartments_out.json")
+    if len(sys.argv)<3:
+        print("Użycie: python compute_finattractiveness_profiles.py <apartments_poi_scores.csv> <apartments_out.json>")
         sys.exit(1)
 
     scores_path = Path(sys.argv[1])
@@ -687,16 +568,14 @@ def main():
     out_dir = scores_path.parent
 
     scores = load_scores(scores_path)
-    apts_raw = load_apartments_from_json(json_path)
-    apts = fill_missing_attributes(apts_raw, seed=123)
+    apts = load_apartments_from_json(json_path)
     out = compute_blocks_and_final(scores, apts)
     save_rankings(out, out_dir)
 
-    print("[OK] Zapisano:")
-    print(f"- {out_dir / 'attractiveness_by_profile.csv'}")
+    print("[OK] Zapisano wyniki w:")
+    print(out_dir/"attractiveness_by_profile.csv")
     for prof in W_POI.keys():
-        print(f"- {out_dir / f'ranking_{prof}.csv'} (TOP mieszkania dla profilu '{prof}')")
-
+        print(out_dir/f"ranking_{prof}.csv")
 
 if __name__ == "__main__":
     main()
