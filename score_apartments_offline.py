@@ -1,4 +1,4 @@
-# save as: score_apartments_offline.py
+# Final version
 from __future__ import annotations
 
 import os
