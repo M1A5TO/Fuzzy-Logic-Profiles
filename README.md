@@ -10,7 +10,7 @@ The project integrates **geospatial data from OpenStreetMap**, **distance analys
 
 ##  Project Overview
 
-The goal is to evaluate residential locations by simulating access to essential Points of Interest (POIs) — such as schools, parks, supermarkets, public transport, and more — within a **15-minute radius (≈1200 m)**.  
+The goal is to evaluate residential locations by simulating access to essential Points of Interest (POIs) — such as schools, parks, supermarkets, public transport, and more — within a **15-minute radius **.  
 A **fuzzy multi-criteria model** converts these spatial and contextual features into an overall *attractiveness score (0 – 1)* for each profile.
 
 ---
