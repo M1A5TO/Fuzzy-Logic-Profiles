@@ -1,23 +1,133 @@
 # Apartment Scoring (15-Minute City)
 ## POI-Dominant Fuzzy Logic System
 
-This repository contains an **apartment attractiveness scoring system** inspired by the *15-minute city* concept.  
-The system computes **profile-specific attractiveness scores (0–100)** using:
+This repository contains an **apartment attractiveness scoring system** inspired by the *15‑minute city* concept.
+It computes **profile-specific attractiveness scores (0–100)** using:
 
 - accessibility of Points of Interest (POIs) measured by walking time,
 - price per square meter (city-aware thresholds),
 - apartment size and number of rooms,
 - interior style,
-- **fuzzy logic inference (Sugeno model)**.
+- **fuzzy logic inference (zero-order Sugeno model)**.
 
-The solution is fully deterministic, explainable.
+The solution is deterministic and explainable.
+
+---
+
+## What is in this repo
+
+- `score_apartments_offline.py` – offline scorer: reads apartments + POI-relations JSON files and produces scored output JSON.
+- `worker_score_apartments.py` – RabbitMQ worker: consumes messages (with `apartment_id`), fetches data from backend API, computes scores in-memory and updates the apartment via API.
+- `.env` – example environment configuration for the worker.
+
+---
+
+## Requirements
+
+- Python 3.10+ (tested with recent Python 3.x; `numpy` must be available)
+- For worker mode:
+  - RabbitMQ server (local or remote)
+  - backend HTTP API reachable under `API_BASE_URL`
+
+---
+
+## Installation
+
+### 1) Create and activate a virtual environment
+
+Windows (PowerShell):
+
+- create venv: `py -m venv .venv`
+- activate: `.\.venv\Scripts\Activate.ps1`
+
+Linux/macOS:
+
+- create venv: `python3 -m venv .venv`
+- activate: `source .venv/bin/activate`
+
+### 2) Install dependencies
+
+Install from `requirements.txt`:
+
+- `pip install -r requirements.txt`
+
+---
+
+## Configuration (.env)
+
+A sample `.env` is included.
+
+Important keys:
+
+- `API_BASE_URL` – backend base URL,`
+- `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS` – RabbitMQ connection
+- `INPUT_QUEUE` – queue name for incoming messages (expects JSON with `apartment_id`)
+
+Scoring tuning (optional env vars used by `score_apartments_offline.py`):
+
+- `TIME_UNIT` – `seconds` (default) or `minutes`
+- `ALPHA` – mixing coefficient for Sugeno vs fallback (default `0.9`)
+- `PRICE_PENALTY_STEP`, `PRICE_PENALTY_PER_STEP`, `PRICE_PENALTY_MAX`
+- `DEBUG_APT_ID` – print debug for a chosen apartment id
+
+Note: `.env` is ignored by git (see `.gitignore`). For deployment set environment variables in the runtime platform instead.
+
+---
+
+## How to run
+
+### A) Offline scoring (batch)
+
+`score_apartments_offline.py` reads:
+
+- Apartments JSON: a list of objects with at least: `id`, `price_per_m2`, `footage`, `room_num`, `city`, `style` (optional).
+- One or more POI relation JSON files: each is a list of objects containing at least:
+  - `apartment_id`
+  - `time_to_poi` (in seconds by default; controlled by `TIME_UNIT`)
+  - `poi.category` (OSM category key) or `category`
+
+Example:
+
+- run scorer: `python score_apartments_offline.py --apartments apartments.json --poi-rels rels1.json rels2.json --out scored.json`
+
+Output:
+
+- a JSON list of apartments with added fields:
+  - `student_attractiveness`, `single_attractiveness`, `dog_owner_attractiveness`, `family_attractiveness`, `universal_attractiveness` (0–100)
+  - `poi_desc` ∈ {LOW, MEDIUM, HIGH}
+  - `price_desc` ∈ {CHEAP, AVERAGE, EXPENSIVE}
+  - `size_desc` ∈ {SMALL, MEDIUM, LARGE}
+
+### B) RabbitMQ worker (online)
+
+The worker:
+
+1. Listens on `INPUT_QUEUE` for JSON messages: `{ "apartment_id": 123 }`
+2. Fetches apartment data: `GET /apartments/{id}`
+3. Fetches POI relations: `GET /apartments/{id}/pois`
+4. Computes scores in memory
+5. Updates backend: `PUT /apartments/{id}` with computed fields
+
+Run:
+
+- `python worker_score_apartments.py`
+
+---
+
+## Troubleshooting
+
+- `ModuleNotFoundError: numpy` → install deps: `pip install -r requirements.txt`
+- `pika.exceptions.AMQPConnectionError` → verify RabbitMQ host/port/user/pass and that RabbitMQ is reachable
+- Worker requires backend endpoints to exist and return JSON:
+  - `GET /apartments/{id}` → `dict`
+  - `GET /apartments/{id}/pois` → `list[dict]`
 
 ---
 
 ## Key Features
 
 - **POI-dominant scoring** – urban accessibility is the primary driver of the result
-- **End-to-end fuzzy logic** – fuzzification → rule inference → Sugeno defuzzification
+- **End-to-end fuzzy logic** – fuzzification → rule inference → Sugeno aggregation
 - **Multiple user profiles** with independent preferences and rules
 - **Easy tuning** – weights, rules, thresholds, penalties
 
@@ -57,7 +167,7 @@ Each profile is defined by two complementary configuration layers:
 - **positive weights** → the profile *wants* the amenity nearby (increases POI score)
 - **negative weights** → the profile *dislikes* the amenity nearby (penalizes POI score)
 
-This allows the same POI evidence to be interpreted differently across profiles.  
+This allows the same POI evidence to be interpreted differently across profiles.
 Example intuition:
 - For `rodzinny` (family), *schools*, *healthcare*, and *parks* are strongly positive, while *clubs* and *pubs* are negative.
 - For `studencki` (student), nightlife and universities may be strongly positive.
@@ -208,7 +318,7 @@ Each rule antecedent is a conjunction of linguistic conditions:
 
 ### Consequent
 
-- Each rule consequent is a **constant value**  
+- Each rule consequent is a **constant value**
   \[
   c \in [0, 1]
   \]
